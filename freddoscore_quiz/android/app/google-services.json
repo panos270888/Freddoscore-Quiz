@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "156055421486",
+    "project_id": "freddoscore-quiz-89ef8",
+    "storage_bucket": "freddoscore-quiz-89ef8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:156055421486:android:e5b14fb96c6b09364bd5bf",
+        "android_client_info": {
+          "package_name": "com.example.freddoscore_quiz"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDNt4seuSGNJa4hC_BvU4fedEnVA-eW-Wc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:156055421486:android:3b50d145ca6de28a4bd5bf",
+        "android_client_info": {
+          "package_name": "com.freddoscore.freddoscorequiz"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDNt4seuSGNJa4hC_BvU4fedEnVA-eW-Wc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
