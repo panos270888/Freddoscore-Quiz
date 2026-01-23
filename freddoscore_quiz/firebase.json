@@ -1,1 +1,47 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"freddoscore-quiz-89ef8","appId":"1:156055421486:android:e5b14fb96c6b09364bd5bf","fileOutput":"android/app/google-services.json"}},"ios":{"default":{"projectId":"freddoscore-quiz-89ef8","appId":"1:156055421486:ios:304eba7fcf0f9eb04bd5bf","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"freddoscore-quiz-89ef8","configurations":{"android":"1:156055421486:android:e5b14fb96c6b09364bd5bf","ios":"1:156055421486:ios:304eba7fcf0f9eb04bd5bf"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "freddoscore-quiz-89ef8",
+          "appId": "1:156055421486:android:e5b14fb96c6b09364bd5bf",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "freddoscore-quiz-89ef8",
+          "appId": "1:156055421486:ios:304eba7fcf0f9eb04bd5bf",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "freddoscore-quiz-89ef8",
+          "configurations": {
+            "android": "1:156055421486:android:e5b14fb96c6b09364bd5bf",
+            "ios": "1:156055421486:ios:304eba7fcf0f9eb04bd5bf"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ],
+      "predeploy": [
+        "npm --prefix \"$RESOURCE_DIR\" run build"
+      ]
+    }
+  ]
+}
