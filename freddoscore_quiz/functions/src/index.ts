@@ -131,3 +131,82 @@ export const startGameSession = onCall(
     };
   }
 );
+
+export const getNextQuestion = onCall(async (request) => {
+  const context = request.auth;
+  const data = request.data;
+
+  if (!context) {
+    throw new HttpsError("unauthenticated", "User must be authenticated");
+  }
+
+  const userId = context.uid;
+  const { sessionId } = data;
+
+  if (!sessionId) {
+    throw new HttpsError("invalid-argument", "Missing sessionId");
+  }
+
+  const sessionRef = db.collection("game_sessions").doc(sessionId);
+
+  return await db.runTransaction(async (tx) => {
+    const sessionSnap = await tx.get(sessionRef);
+
+    if (!sessionSnap.exists) {
+      throw new HttpsError("not-found", "GameSession not found");
+    }
+
+    const session = sessionSnap.data()!;
+
+    if (session.status !== "active") {
+      throw new HttpsError("failed-precondition", "Game is not active");
+    }
+
+    if (session.currentTurnUserId !== userId) {
+      throw new HttpsError("permission-denied", "Not your turn");
+    }
+
+    if (session.currentQuestionId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Question already fetched for this turn"
+      );
+    }
+
+    const usedIds =
+      session.players?.[userId]?.usedQuestionIds ?? [];
+
+    const questionsSnap = await db
+      .collection("questions")
+      .where("metadata.isActive", "==", true)
+      .get();
+
+    const available = questionsSnap.docs.filter(
+      (doc) => !usedIds.includes(doc.id)
+    );
+
+    if (available.length === 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "No available questions left"
+      );
+    }
+
+    const selected =
+      available[Math.floor(Math.random() * available.length)];
+
+    tx.update(sessionRef, {
+      currentQuestionId: selected.id,
+      currentQuestionStartedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const q = selected.data();
+
+    return {
+      questionId: selected.id,
+      text: q.text,
+      hints: q.hints.slice(0, 3),
+    };
+  });
+});
