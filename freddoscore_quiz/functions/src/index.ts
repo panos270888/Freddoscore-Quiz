@@ -210,3 +210,127 @@ export const getNextQuestion = onCall(async (request) => {
     };
   });
 });
+
+export const submitAnswer = onCall(async (request) => {
+  const context = request.auth;
+  const data = request.data;
+
+  if (!context) {
+    throw new HttpsError("unauthenticated", "User must be authenticated");
+  }
+
+  const userId = context.uid;
+  const { sessionId, questionId, answerText } = data;
+
+  if (!sessionId || !questionId || !answerText) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Missing sessionId, questionId, or answerText"
+    );
+  }
+
+  const sessionRef = db.collection("game_sessions").doc(sessionId);
+  const questionRef = db.collection("questions").doc(questionId);
+
+  return await db.runTransaction(async (tx) => {
+    const sessionSnap = await tx.get(sessionRef);
+    if (!sessionSnap.exists) {
+      throw new HttpsError("not-found", "GameSession not found");
+    }
+
+    const session = sessionSnap.data()!;
+
+    if (session.status !== "active") {
+      throw new HttpsError("failed-precondition", "Game is not active");
+    }
+
+    if (session.currentTurnUserId !== userId) {
+      throw new HttpsError("permission-denied", "Not your turn");
+    }
+
+    if (session.currentQuestionId !== questionId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Question does not match current turn"
+      );
+    }
+
+    const questionSnap = await tx.get(questionRef);
+    if (!questionSnap.exists) {
+      throw new HttpsError("not-found", "Question not found");
+    }
+
+    const question = questionSnap.data()!;
+    const canonicalAnswer =
+      question.answer?.canonical?.toString().trim().toLowerCase();
+
+    if (!canonicalAnswer) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Question has no canonical answer"
+      );
+    }
+
+    const normalizedAnswer = answerText.trim().toLowerCase();
+    const isCorrect = normalizedAnswer === canonicalAnswer;
+
+    const playerState = session.players[userId];
+
+    const updatedScore = isCorrect
+      ? playerState.score + 1
+      : playerState.score;
+
+    const updatedQuestionsAnswered =
+      (playerState.questionsAnswered ?? 0) + 1;
+
+    const updatedUsedIds = [
+      ...(playerState.usedQuestionIds ?? []),
+      questionId,
+    ];
+
+    const nextTurnUserId =
+      session.player1Id === userId
+        ? session.player2Id
+        : session.player1Id;
+
+    const nextTurnNumber = session.turnNumber + 1;
+
+    const gameFinished = nextTurnNumber > 20;
+
+    const updates: any = {
+      [`players.${userId}.score`]: updatedScore,
+      [`players.${userId}.questionsAnswered`]:
+        updatedQuestionsAnswered,
+      [`players.${userId}.usedQuestionIds`]: updatedUsedIds,
+      currentQuestionId: admin.firestore.FieldValue.delete(),
+      currentQuestionStartedAt:
+        admin.firestore.FieldValue.delete(),
+    };
+
+    if (gameFinished) {
+      updates.status = "finished";
+      updates.winnerUserId =
+        session.players[session.player1Id].score >
+        session.players[session.player2Id].score
+          ? session.player1Id
+          : session.player2Id;
+      updates.finishedAt =
+        admin.firestore.FieldValue.serverTimestamp();
+    } else {
+      updates.currentTurnUserId = nextTurnUserId;
+      updates.turnNumber = nextTurnNumber;
+    }
+
+    tx.update(sessionRef, updates);
+
+    return {
+      isCorrect,
+      correctAnswer: question.answer.canonical,
+      yourScore: updatedScore,
+      nextTurnUserId: gameFinished
+        ? null
+        : nextTurnUserId,
+      gameFinished,
+    };
+  });
+});
