@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../auth/auth_service.dart';
+import 'package:freddoscore_quiz/screens/game_screen.dart';
 
 class HomePage extends StatelessWidget {
   HomePage({super.key});
@@ -23,9 +24,24 @@ class HomePage extends StatelessWidget {
         ],
       ),
       body: Center(
-        child: Text(
-          'Welcome ${user?.email ?? ''}',
-          style: const TextStyle(fontSize: 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Welcome ${user?.email ?? ''}',
+              style: const TextStyle(fontSize: 18),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const GameScreen()),
+                );
+              },
+              child: const Text('Start Game MVP'),
+            ),
+          ],
         ),
       ),
     );

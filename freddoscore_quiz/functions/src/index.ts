@@ -98,8 +98,7 @@ export const startGameSession = onCall(
         );
       }
 
-      const startingUserId =
-        Math.random() < 0.5 ? callerId : opponentUserId;
+      const startingUserId = callerId;
 
       tx.set(sessionRef, {
         status: "active",
