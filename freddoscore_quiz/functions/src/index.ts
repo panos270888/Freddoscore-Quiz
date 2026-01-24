@@ -46,6 +46,69 @@ export const startGameSession = onCall(async (request) => {
  * Questions are NOT allowed until the game is active.
  * This function is intentionally blocked for now.
  */
+
+export const joinGameSession = onCall(async (request) => {
+  const context = request.auth;
+
+  if (!context) {
+    throw new HttpsError("unauthenticated", "User must be authenticated");
+  }
+
+  const userId = context.uid;
+  const { sessionId } = request.data;
+
+  if (!sessionId) {
+    throw new HttpsError("invalid-argument", "Missing sessionId");
+  }
+
+  const sessionRef = db.collection("game_sessions").doc(sessionId);
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(sessionRef);
+
+    if (!snap.exists) {
+      throw new HttpsError("not-found", "GameSession not found");
+    }
+
+    const session = snap.data()!;
+
+    if (session.status !== "waiting") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Game is not waiting for players"
+      );
+    }
+
+    if (session.players[userId]) {
+      throw new HttpsError(
+        "failed-precondition",
+        "User already in game"
+      );
+    }
+
+    const creatorId = session.createdByUserId;
+
+    //const playerIds = [creatorId, userId];
+    const startingUserId =
+      Math.random() < 0.5 ? creatorId : userId;
+
+    tx.update(sessionRef, {
+      status: "active",
+      player1Id: creatorId,
+      player2Id: userId,
+      currentTurnUserId: startingUserId,
+      turnNumber: 1,
+      [`players.${userId}`]: {
+        score: 0,
+        questionsAnswered: 0,
+        usedQuestionIds: [],
+      },
+    });
+  });
+
+  return { success: true };
+});
+
 export const getNextQuestion = onCall(async (request) => {
   const context = request.auth;
 
