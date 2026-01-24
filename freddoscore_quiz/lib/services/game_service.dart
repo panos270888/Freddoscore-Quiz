@@ -3,14 +3,8 @@ import 'package:cloud_functions/cloud_functions.dart';
 class GameService {
   final FirebaseFunctions _functions = FirebaseFunctions.instance;
 
-  Future<String> startGame({
-    required String opponentUserId,
-    required String proximityCode,
-  }) async {
-    final result = await _functions.httpsCallable('startGameSession').call({
-      'opponentUserId': opponentUserId,
-      'proximityCode': proximityCode,
-    });
+  Future<String> startGame() async {
+    final result = await _functions.httpsCallable('startGameSession').call();
 
     return result.data['sessionId'];
   }
