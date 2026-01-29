@@ -25,6 +25,7 @@ export const startGameSession = onCall(async (request) => {
   await sessionRef.set({
     status: "waiting",
     createdByUserId: callerId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
     players: {
       [callerId]: {
         score: 0,
@@ -32,12 +33,10 @@ export const startGameSession = onCall(async (request) => {
         usedQuestionIds: [],
       },
     },
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
   return {
     sessionId: sessionRef.id,
-    status: "waiting",
   };
 });
 
@@ -49,64 +48,72 @@ export const startGameSession = onCall(async (request) => {
 
 export const joinGameSession = onCall(async (request) => {
   const context = request.auth;
+  const { sessionId } = request.data;
 
   if (!context) {
     throw new HttpsError("unauthenticated", "User must be authenticated");
   }
 
-  const userId = context.uid;
-  const { sessionId } = request.data;
-
   if (!sessionId) {
     throw new HttpsError("invalid-argument", "Missing sessionId");
   }
 
+  const userId = context.uid;
   const sessionRef = db.collection("game_sessions").doc(sessionId);
 
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(sessionRef);
+  return await db.runTransaction(async (tx) => {
+    const sessionSnap = await tx.get(sessionRef);
 
-    if (!snap.exists) {
-      throw new HttpsError("not-found", "GameSession not found");
+    if (!sessionSnap.exists) {
+      throw new HttpsError("not-found", "Game session not found");
     }
 
-    const session = snap.data()!;
+    const session = sessionSnap.data()!;
 
     if (session.status !== "waiting") {
       throw new HttpsError(
         "failed-precondition",
-        "Game is not waiting for players"
+        "Game has already started"
       );
     }
 
-    if (session.players[userId]) {
+    if (session.players?.[userId]) {
       throw new HttpsError(
         "failed-precondition",
-        "User already in game"
+        "User already joined"
       );
     }
 
-    const creatorId = session.createdByUserId;
+    const existingPlayerIds = Object.keys(session.players);
+    if (existingPlayerIds.length !== 1) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Invalid game state"
+      );
+    }
 
-    //const playerIds = [creatorId, userId];
+    const creatorId = existingPlayerIds[0];
+
+    // Randomly choose starting player
     const startingUserId =
       Math.random() < 0.5 ? creatorId : userId;
 
     tx.update(sessionRef, {
       status: "active",
-      player1Id: creatorId,
-      player2Id: userId,
-      currentTurnUserId: startingUserId,
       turnNumber: 1,
+      currentTurnUserId: startingUserId,
       [`players.${userId}`]: {
         score: 0,
         questionsAnswered: 0,
         usedQuestionIds: [],
       },
     });
-  });
 
-  return { success: true };
+    return {
+      status: "active",
+      currentTurnUserId: startingUserId,
+    };
+  });
 });
 
 export const getNextQuestion = onCall(async (request) => {
