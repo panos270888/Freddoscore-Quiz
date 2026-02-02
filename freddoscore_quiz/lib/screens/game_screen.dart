@@ -23,9 +23,8 @@ class _GameScreenState extends State<GameScreen> {
 
   String? questionId;
   String? questionText;
-  List<String> hints = [];
-  int myScore = 0;
   bool answering = false;
+  int myScore = 0;
 
   String get myUserId => FirebaseAuth.instance.currentUser!.uid;
 
@@ -62,7 +61,7 @@ class _GameScreenState extends State<GameScreen> {
      ========================= */
 
   Future<void> loadQuestion() async {
-    if (answering) return;
+    if (answering || questionText != null) return;
 
     setState(() => answering = true);
 
@@ -73,6 +72,26 @@ class _GameScreenState extends State<GameScreen> {
     setState(() {
       questionId = result.data['questionId'];
       questionText = result.data['text'];
+      answering = false;
+    });
+  }
+
+  Future<void> submitAnswer() async {
+    if (questionId == null) return;
+
+    setState(() => answering = true);
+
+    final result = await functions.httpsCallable('submitAnswer').call({
+      'sessionId': sessionId,
+      'questionId': questionId,
+      'answerText': _answerController.text.trim(),
+    });
+
+    setState(() {
+      myScore = result.data['yourScore'];
+      questionId = null;
+      questionText = null;
+      _answerController.clear();
       answering = false;
     });
   }
@@ -114,30 +133,31 @@ class _GameScreenState extends State<GameScreen> {
       );
     }
 
-    // 🔥 CRITICAL FIX IS HERE
+    // ACTIVE GAME
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('game_sessions')
           .doc(sessionId)
           .snapshots(),
       builder: (context, snapshot) {
-        // ✅ FIX #1: wait for connection, not data
+        // connection gate
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
         }
 
-        // ✅ FIX #2: explicit existence check
         if (!snapshot.hasData || !snapshot.data!.exists) {
           return const Scaffold(body: Center(child: Text('Session not found')));
         }
 
         final data = snapshot.data!.data() as Map<String, dynamic>;
+
         final status = data['status'];
         final currentTurnUserId = data['currentTurnUserId'];
+        final isMyTurn = currentTurnUserId == myUserId;
 
-        // WAITING STATE
+        // WAITING FOR OPPONENT
         if (status == 'waiting') {
           return const Scaffold(
             body: Center(
@@ -149,9 +169,7 @@ class _GameScreenState extends State<GameScreen> {
           );
         }
 
-        final isMyTurn = currentTurnUserId == myUserId;
-
-        // AUTO-LOAD QUESTION ON TURN
+        // AUTO LOAD QUESTION WHEN MY TURN
         if (isMyTurn && questionText == null && !answering) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             loadQuestion();
@@ -160,14 +178,43 @@ class _GameScreenState extends State<GameScreen> {
 
         return Scaffold(
           appBar: AppBar(title: const Text('Game')),
-          body: Center(
-            child: Text(
-              isMyTurn ? 'Your turn' : 'Opponent’s turn',
-              style: const TextStyle(fontSize: 24),
-            ),
+          body: Padding(
+            padding: const EdgeInsets.all(16),
+            child: isMyTurn ? _buildMyTurn() : _buildOpponentTurn(),
           ),
         );
       },
+    );
+  }
+
+  Widget _buildOpponentTurn() {
+    return const Center(
+      child: Text('Opponent’s turn', style: TextStyle(fontSize: 24)),
+    );
+  }
+
+  Widget _buildMyTurn() {
+    if (questionText == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Your score: $myScore', style: const TextStyle(fontSize: 16)),
+        const SizedBox(height: 12),
+        Text(questionText!, style: const TextStyle(fontSize: 18)),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _answerController,
+          decoration: const InputDecoration(labelText: 'Your answer'),
+        ),
+        const SizedBox(height: 16),
+        ElevatedButton(
+          onPressed: answering ? null : submitAnswer,
+          child: const Text('Submit'),
+        ),
+      ],
     );
   }
 

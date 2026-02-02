@@ -107,13 +107,18 @@ export const getNextQuestion = onCall(async (request) => {
     throw new HttpsError("unauthenticated", "User must be authenticated");
   }
 
+  if (!sessionId) {
+    throw new HttpsError("invalid-argument", "Missing sessionId");
+  }
+
   const userId = auth.uid;
   const sessionRef = db.collection("game_sessions").doc(sessionId);
 
   return await db.runTransaction(async (tx) => {
     const sessionSnap = await tx.get(sessionRef);
+
     if (!sessionSnap.exists) {
-      throw new HttpsError("not-found", "Game not found");
+      throw new HttpsError("not-found", "Game session not found");
     }
 
     const session = sessionSnap.data()!;
@@ -126,33 +131,48 @@ export const getNextQuestion = onCall(async (request) => {
       throw new HttpsError("permission-denied", "Not your turn");
     }
 
+    // get already-used questions
     const usedIds =
       session.players?.[userId]?.usedQuestionIds ?? [];
 
+    // fetch active questions
     const questionsSnap = await db
       .collection("questions")
       .where("metadata.isActive", "==", true)
       .get();
 
     const available = questionsSnap.docs.filter(
-      (q) => !usedIds.includes(q.id)
+      (doc) => !usedIds.includes(doc.id)
     );
 
     if (available.length === 0) {
-      throw new HttpsError("failed-precondition", "No questions left");
+      throw new HttpsError(
+        "failed-precondition",
+        "No available questions"
+      );
     }
 
     const selected =
       available[Math.floor(Math.random() * available.length)];
 
+    const q = selected.data();
+
+    // 🔴 IMPORTANT: adapt to your current schema
+    const hints = [
+      q.hint1,
+      q.hint2,
+      q.hint3,
+    ].filter(Boolean);
+
+    // mark question as active for this turn
     tx.update(sessionRef, {
       currentQuestionId: selected.id,
     });
 
     return {
       questionId: selected.id,
-      text: selected.data().text,
-      hints: selected.data().hints.slice(0, 3),
+      text: q.text,
+      hints,
     };
   });
 });
