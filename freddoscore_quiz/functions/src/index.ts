@@ -8,113 +8,101 @@ const db = admin.firestore();
 setGlobalOptions({ maxInstances: 10 });
 
 /* =========================================================
-   START GAME SESSION (OPEN SESSION)
-========================================================= */
+   START OR AUTO-JOIN GAME SESSION
+   ========================================================= */
 export const startGameSession = onCall(async (request) => {
-  const context = request.auth;
-  if (!context) {
+  if (!request.auth) {
     throw new HttpsError("unauthenticated", "Login required");
   }
 
-  const userId = context.uid;
-  const sessionRef = db.collection("game_sessions").doc();
-
-  await sessionRef.set({
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    createdByUserId: userId,
-    player1Id: userId,
-    status: "waiting",
-    turnNumber: 1,
-    players: {
-      [userId]: {
-        score: 0,
-        questionsAnswered: 0,
-        usedQuestionIds: [],
-      },
-    },
-  });
-
-  return {
-    sessionId: sessionRef.id,
-  };
-});
-
-/* =========================================================
-   JOIN GAME SESSION
-========================================================= */
-export const joinGameSession = onCall(async (request) => {
-  const context = request.auth;
-  if (!context) {
-    throw new HttpsError("unauthenticated", "Login required");
-  }
-
-  const userId = context.uid;
-  const { sessionId } = request.data;
-
-  if (!sessionId) {
-    throw new HttpsError("invalid-argument", "Missing sessionId");
-  }
-
-  const sessionRef = db.collection("game_sessions").doc(sessionId);
+  const userId = request.auth.uid;
 
   return await db.runTransaction(async (tx) => {
-    const snap = await tx.get(sessionRef);
-    if (!snap.exists) {
-      throw new HttpsError("not-found", "Session not found");
+    // 1️⃣ Try to find an open session
+    const openSnap = await tx.get(
+      db
+        .collection("game_sessions")
+        .where("status", "==", "open")
+        .limit(1)
+    );
+
+    // 2️⃣ Join existing open session
+    if (!openSnap.empty) {
+      const doc = openSnap.docs[0];
+      const session = doc.data();
+
+      if (session.createdByUserId === userId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Waiting for another player"
+        );
+      }
+
+      tx.update(doc.ref, {
+        status: "active",
+        player2Id: userId,
+        currentTurnUserId: session.createdByUserId,
+        players: {
+          ...session.players,
+          [userId]: {
+            score: 0,
+            questionsAnswered: 0,
+            usedQuestionIds: [],
+          },
+        },
+      });
+
+      return { sessionId: doc.id, joined: true };
     }
 
-    const session = snap.data()!;
+    // 3️⃣ Create new open session
+    const sessionRef = db.collection("game_sessions").doc();
 
-    if (session.status !== "waiting") {
-      throw new HttpsError("failed-precondition", "Game already started");
-    }
-
-    if (session.player1Id === userId) {
-      throw new HttpsError("failed-precondition", "Cannot join your own game");
-    }
-
-    tx.update(sessionRef, {
-      player2Id: userId,
-      status: "active",
-      currentTurnUserId: session.player1Id,
-      [`players.${userId}`]: {
-        score: 0,
-        questionsAnswered: 0,
-        usedQuestionIds: [],
+    tx.set(sessionRef, {
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdByUserId: userId,
+      player1Id: userId,
+      player2Id: null,
+      status: "open",
+      currentTurnUserId: userId,
+      turnNumber: 1,
+      players: {
+        [userId]: {
+          score: 0,
+          questionsAnswered: 0,
+          usedQuestionIds: [],
+        },
       },
     });
 
-    return { success: true };
+    return { sessionId: sessionRef.id, joined: false };
   });
 });
 
 /* =========================================================
-   GET NEXT QUESTION
-========================================================= */
+   ASSIGN NEXT QUESTION (SERVER IS SOURCE OF TRUTH)
+   ========================================================= */
 export const getNextQuestion = onCall(async (request) => {
-  const auth = request.auth;
+  const context = request.auth;
   const { sessionId } = request.data;
 
-  if (!auth) {
-    throw new HttpsError("unauthenticated", "User must be authenticated");
+  if (!context) {
+    throw new HttpsError("unauthenticated", "Login required");
   }
-
   if (!sessionId) {
     throw new HttpsError("invalid-argument", "Missing sessionId");
   }
 
-  const userId = auth.uid;
+  const userId = context.uid;
   const sessionRef = db.collection("game_sessions").doc(sessionId);
 
   return await db.runTransaction(async (tx) => {
     const sessionSnap = await tx.get(sessionRef);
-
     if (!sessionSnap.exists) {
-      throw new HttpsError("not-found", "Game session not found");
+      throw new HttpsError("not-found", "Session not found");
     }
 
     const session = sessionSnap.data()!;
-
     if (session.status !== "active") {
       throw new HttpsError("failed-precondition", "Game not active");
     }
@@ -123,11 +111,14 @@ export const getNextQuestion = onCall(async (request) => {
       throw new HttpsError("permission-denied", "Not your turn");
     }
 
-    // get already-used questions
+    // 🔒 Question already assigned
+    if (session.currentQuestionId) {
+      return { ok: true };
+    }
+
     const usedIds =
       session.players?.[userId]?.usedQuestionIds ?? [];
 
-    // fetch active questions
     const questionsSnap = await db
       .collection("questions")
       .where("metadata.isActive", "==", true)
@@ -147,31 +138,20 @@ export const getNextQuestion = onCall(async (request) => {
     const selected =
       available[Math.floor(Math.random() * available.length)];
 
-    const q = selected.data();
-
-    // 🔴 IMPORTANT: adapt to your current schema
-    const hints = [
-      q.hint1,
-      q.hint2,
-      q.hint3,
-    ].filter(Boolean);
-
-    // mark question as active for this turn
+    // 🔥 AUTHORITATIVE WRITE
     tx.update(sessionRef, {
       currentQuestionId: selected.id,
+      currentQuestionStartedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    return {
-      questionId: selected.id,
-      text: q.text,
-      hints,
-    };
+    return { ok: true };
   });
 });
 
 /* =========================================================
-   SUBMIT ANSWER
-========================================================= */
+   SUBMIT ANSWER + TURN LOOP
+   ========================================================= */
 export const submitAnswer = onCall(async (request) => {
   const context = request.auth;
   const { sessionId, questionId, answerText } = request.data;
@@ -203,29 +183,36 @@ export const submitAnswer = onCall(async (request) => {
       throw new HttpsError("failed-precondition", "Invalid question");
     }
 
-    const questionSnap = await tx.get(questionRef);
-    if (!questionSnap.exists) {
+    const qSnap = await tx.get(questionRef);
+    if (!qSnap.exists) {
       throw new HttpsError("not-found", "Question not found");
     }
 
     const correct =
-      answerText.trim().toLowerCase() ===
-      questionSnap.data()!.answer.canonical.toLowerCase();
+      qSnap.data()!.answer.canonical
+        .toLowerCase()
+        .trim() ===
+      answerText.toLowerCase().trim();
 
     const playerIds = Object.keys(session.players);
     const nextTurnUserId =
       playerIds.find((id) => id !== userId)!;
+
+    const currentScore =
+      session.players[userId].score ?? 0;
 
     const nextTurnNumber = (session.turnNumber ?? 0) + 1;
     const MAX_TURNS = 10;
     const gameFinished = nextTurnNumber >= MAX_TURNS;
 
     const updates: any = {
-      currentQuestionId: admin.firestore.FieldValue.delete(),
-      currentQuestionStartedAt: admin.firestore.FieldValue.delete(),
+      currentQuestionId:
+        admin.firestore.FieldValue.delete(),
+      currentQuestionStartedAt:
+        admin.firestore.FieldValue.delete(),
       turnNumber: nextTurnNumber,
       [`players.${userId}.score`]:
-        (session.players[userId].score ?? 0) + (correct ? 1 : 0),
+        currentScore + (correct ? 1 : 0),
       [`players.${userId}.usedQuestionIds`]:
         admin.firestore.FieldValue.arrayUnion(questionId),
     };
@@ -235,7 +222,6 @@ export const submitAnswer = onCall(async (request) => {
       updates.finishedAt =
         admin.firestore.FieldValue.serverTimestamp();
     } else {
-      // 🔥 THIS WAS MISSING 🔥
       updates.currentTurnUserId = nextTurnUserId;
     }
 
@@ -243,7 +229,8 @@ export const submitAnswer = onCall(async (request) => {
 
     return {
       isCorrect: correct,
-      yourScore: updates[`players.${userId}.score`],
+      yourScore:
+        currentScore + (correct ? 1 : 0),
       gameFinished,
     };
   });

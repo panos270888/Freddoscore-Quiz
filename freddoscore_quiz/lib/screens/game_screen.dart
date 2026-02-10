@@ -17,50 +17,51 @@ class GameScreen extends StatefulWidget {
 class _GameScreenState extends State<GameScreen> {
   String? sessionId;
   bool loading = false;
-
-  final TextEditingController _sessionController = TextEditingController();
-  final TextEditingController _answerController = TextEditingController();
-
-  DocumentSnapshot? questionDoc;
   bool answering = false;
+
+  String? localQuestionId;
+  String? questionText;
+  List<String> hints = [];
   int myScore = 0;
+
+  final TextEditingController _answerController = TextEditingController();
 
   String get myUserId => FirebaseAuth.instance.currentUser!.uid;
 
   /* =========================
-     SESSION ACTIONS
+     START / AUTO-JOIN
      ========================= */
 
   Future<void> startGame() async {
     setState(() => loading = true);
+
     final result = await functions.httpsCallable('startGameSession').call();
+
     setState(() {
       sessionId = result.data['sessionId'];
       loading = false;
     });
   }
 
-  Future<void> joinGame() async {
-    setState(() => loading = true);
-    final id = _sessionController.text.trim();
-    await functions.httpsCallable('joinGameSession').call({'sessionId': id});
-    setState(() {
-      sessionId = id;
-      loading = false;
-    });
-  }
+  /* =========================
+     QUESTION FLOW
+     ========================= */
 
   Future<void> requestQuestion() async {
     if (answering) return;
+
     setState(() => answering = true);
+
     await functions.httpsCallable('getNextQuestion').call({
       'sessionId': sessionId,
     });
+
     setState(() => answering = false);
   }
 
   Future<void> submitAnswer(String questionId) async {
     setState(() => answering = true);
+
     final result = await functions.httpsCallable('submitAnswer').call({
       'sessionId': sessionId,
       'questionId': questionId,
@@ -70,6 +71,9 @@ class _GameScreenState extends State<GameScreen> {
     setState(() {
       myScore = result.data['yourScore'];
       _answerController.clear();
+      localQuestionId = null;
+      questionText = null;
+      hints = [];
       answering = false;
     });
   }
@@ -80,36 +84,22 @@ class _GameScreenState extends State<GameScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // LOBBY
     if (sessionId == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Game MVP')),
-        body: Padding(
-          padding: const EdgeInsets.all(16),
+        appBar: AppBar(title: const Text('Game')),
+        body: Center(
           child: loading
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    ElevatedButton(
-                      onPressed: startGame,
-                      child: const Text('Start Game'),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: _sessionController,
-                      decoration: const InputDecoration(
-                        labelText: 'Session ID to join',
-                      ),
-                    ),
-                    ElevatedButton(
-                      onPressed: joinGame,
-                      child: const Text('Join Game'),
-                    ),
-                  ],
+              ? const CircularProgressIndicator()
+              : ElevatedButton(
+                  onPressed: startGame,
+                  child: const Text('Start Game'),
                 ),
         ),
       );
     }
 
+    // SESSION LISTENER
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('game_sessions')
@@ -123,20 +113,21 @@ class _GameScreenState extends State<GameScreen> {
         }
 
         final session = sessionSnap.data!.data() as Map<String, dynamic>;
+
         final status = session['status'];
         final currentTurnUserId = session['currentTurnUserId'];
-        final currentQuestionId = session['currentQuestionId'];
+        final firestoreQuestionId = session['currentQuestionId'];
 
-        final isMyTurn = currentTurnUserId == myUserId;
-
-        if (status == 'waiting') {
+        if (status != 'active') {
           return const Scaffold(
             body: Center(child: Text('Waiting for opponent...')),
           );
         }
 
-        // 🔑 ONLY ACTIVE PLAYER REQUESTS QUESTION
-        if (isMyTurn && currentQuestionId == null && !answering) {
+        final isMyTurn = currentTurnUserId == myUserId;
+
+        // 🔥 DETERMINISTIC QUESTION REQUEST
+        if (isMyTurn && firestoreQuestionId == null && !answering) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             requestQuestion();
           });
@@ -144,14 +135,14 @@ class _GameScreenState extends State<GameScreen> {
 
         return Scaffold(
           appBar: AppBar(
-            title: Text(isMyTurn ? 'Your turn' : 'Opponent’s turn'),
+            title: Text(isMyTurn ? 'Your turn' : "Opponent’s turn"),
           ),
-          body: currentQuestionId == null
+          body: firestoreQuestionId == null
               ? const Center(child: CircularProgressIndicator())
               : StreamBuilder<DocumentSnapshot>(
                   stream: FirebaseFirestore.instance
                       .collection('questions')
-                      .doc(currentQuestionId)
+                      .doc(firestoreQuestionId)
                       .snapshots(),
                   builder: (context, qSnap) {
                     if (!qSnap.hasData) {
@@ -160,16 +151,30 @@ class _GameScreenState extends State<GameScreen> {
 
                     final q = qSnap.data!.data() as Map<String, dynamic>;
 
+                    final question = q['text'];
+                    final qHints = [
+                      q['hint1'],
+                      q['hint2'],
+                      q['hint3'],
+                    ].whereType<String>().toList();
+
                     return Padding(
                       padding: const EdgeInsets.all(16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(q['text'], style: const TextStyle(fontSize: 18)),
+                          Text(
+                            'Score: $myScore',
+                            style: const TextStyle(fontSize: 16),
+                          ),
                           const SizedBox(height: 12),
-                          Text('• ${q['hint1']}'),
-                          Text('• ${q['hint2']}'),
-                          Text('• ${q['hint3']}'),
+
+                          // QUESTION (VISIBLE TO BOTH)
+                          Text(question, style: const TextStyle(fontSize: 18)),
+                          const SizedBox(height: 12),
+
+                          ...qHints.map((h) => Text('• $h')),
+
                           const SizedBox(height: 16),
 
                           if (isMyTurn) ...[
@@ -183,7 +188,7 @@ class _GameScreenState extends State<GameScreen> {
                             ElevatedButton(
                               onPressed: answering
                                   ? null
-                                  : () => submitAnswer(currentQuestionId),
+                                  : () => submitAnswer(firestoreQuestionId),
                               child: const Text('Submit'),
                             ),
                           ] else
@@ -199,5 +204,11 @@ class _GameScreenState extends State<GameScreen> {
         );
       },
     );
+  }
+
+  @override
+  void dispose() {
+    _answerController.dispose();
+    super.dispose();
   }
 }
