@@ -3,9 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 
-final FirebaseFunctions functions = FirebaseFunctions.instanceFor(
-  region: 'us-central1',
-);
+final functions = FirebaseFunctions.instanceFor(region: 'us-central1');
 
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key});
@@ -16,199 +14,228 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> {
   String? sessionId;
-  bool loading = false;
-  bool answering = false;
 
-  String? localQuestionId;
+  bool loading = false;
+  bool loadingQuestion = false;
+
+  String error = '';
+
+  String? questionId;
   String? questionText;
   List<String> hints = [];
-  int myScore = 0;
 
   final TextEditingController _answerController = TextEditingController();
 
   String get myUserId => FirebaseAuth.instance.currentUser!.uid;
 
-  /* =========================
-     START / AUTO-JOIN
-     ========================= */
+  /* ============================
+     START GAME (LOCKED MVP)
+  ============================ */
 
   Future<void> startGame() async {
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+      error = '';
+    });
 
-    final result = await functions.httpsCallable('startGameSession').call();
+    try {
+      // Find another logged-in user (temporary MVP logic)
+      final usersSnap = await FirebaseFirestore.instance
+          .collection('users')
+          .get();
+
+      final opponentId = usersSnap.docs
+          .map((d) => d.id)
+          .firstWhere((id) => id != myUserId, orElse: () => '');
+
+      if (opponentId.isEmpty) {
+        throw Exception('No opponent available');
+      }
+
+      final result = await functions.httpsCallable('startGameSession').call({
+        'opponentUserId': opponentId,
+      });
+
+      setState(() {
+        sessionId = result.data['sessionId'];
+        loading = false;
+      });
+    } catch (e) {
+      setState(() {
+        loading = false;
+        error = e.toString();
+      });
+    }
+  }
+
+  /* ============================
+     LOAD QUESTION
+  ============================ */
+
+  Future<void> loadQuestion() async {
+    if (loadingQuestion || sessionId == null) return;
 
     setState(() {
-      sessionId = result.data['sessionId'];
-      loading = false;
+      loadingQuestion = true;
     });
+
+    try {
+      final result = await functions.httpsCallable('getNextQuestion').call({
+        'sessionId': sessionId,
+      });
+
+      setState(() {
+        questionId = result.data['questionId'];
+        questionText = result.data['text'];
+        hints = List<String>.from(result.data['hints']);
+        loadingQuestion = false;
+      });
+    } catch (e) {
+      setState(() {
+        loadingQuestion = false;
+        error = e.toString();
+      });
+    }
   }
 
-  /* =========================
-     QUESTION FLOW
-     ========================= */
+  /* ============================
+     SUBMIT ANSWER
+  ============================ */
 
-  Future<void> requestQuestion() async {
-    if (answering) return;
-
-    setState(() => answering = true);
-
-    await functions.httpsCallable('getNextQuestion').call({
-      'sessionId': sessionId,
-    });
-
-    setState(() => answering = false);
-  }
-
-  Future<void> submitAnswer(String questionId) async {
-    setState(() => answering = true);
-
-    final result = await functions.httpsCallable('submitAnswer').call({
-      'sessionId': sessionId,
-      'questionId': questionId,
-      'answerText': _answerController.text.trim(),
-    });
+  Future<void> submitAnswer() async {
+    if (questionId == null) return;
 
     setState(() {
-      myScore = result.data['yourScore'];
-      _answerController.clear();
-      localQuestionId = null;
-      questionText = null;
-      hints = [];
-      answering = false;
+      loadingQuestion = true;
     });
+
+    try {
+      await functions.httpsCallable('submitAnswer').call({
+        'sessionId': sessionId,
+        'questionId': questionId,
+        'answerText': _answerController.text.trim(),
+      });
+
+      setState(() {
+        questionId = null;
+        questionText = null;
+        hints = [];
+        _answerController.clear();
+        loadingQuestion = false;
+      });
+    } catch (e) {
+      setState(() {
+        loadingQuestion = false;
+        error = e.toString();
+      });
+    }
   }
 
-  /* =========================
+  /* ============================
      UI
-     ========================= */
+  ============================ */
 
   @override
   Widget build(BuildContext context) {
     // LOBBY
     if (sessionId == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Game')),
+        appBar: AppBar(title: const Text('Game MVP')),
         body: Center(
           child: loading
               ? const CircularProgressIndicator()
-              : ElevatedButton(
-                  onPressed: startGame,
-                  child: const Text('Start Game'),
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ElevatedButton(
+                      onPressed: startGame,
+                      child: const Text('Start Game'),
+                    ),
+                    if (error.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(error, style: const TextStyle(color: Colors.red)),
+                    ],
+                  ],
                 ),
         ),
       );
     }
 
-    // SESSION LISTENER
+    // ACTIVE GAME
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('game_sessions')
           .doc(sessionId)
           .snapshots(),
-      builder: (context, sessionSnap) {
-        if (!sessionSnap.hasData) {
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
         }
 
-        final session = sessionSnap.data!.data() as Map<String, dynamic>;
-
-        final status = session['status'];
-        final currentTurnUserId = session['currentTurnUserId'];
-        final firestoreQuestionId = session['currentQuestionId'];
-
-        if (status != 'active') {
-          return const Scaffold(
-            body: Center(child: Text('Waiting for opponent...')),
-          );
-        }
+        final data = snapshot.data!.data() as Map<String, dynamic>;
+        final currentTurnUserId = data['currentTurnUserId'];
+        final currentQuestionId = data['currentQuestionId'];
 
         final isMyTurn = currentTurnUserId == myUserId;
 
-        // 🔥 DETERMINISTIC QUESTION REQUEST
-        if (isMyTurn && firestoreQuestionId == null && !answering) {
+        // 🔥 AUTO-LOAD QUESTION WHEN IT'S MY TURN
+        if (isMyTurn &&
+            currentQuestionId == null &&
+            questionId == null &&
+            !loadingQuestion) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            requestQuestion();
+            loadQuestion();
           });
         }
 
         return Scaffold(
           appBar: AppBar(
-            title: Text(isMyTurn ? 'Your turn' : "Opponent’s turn"),
+            title: Text(isMyTurn ? 'Your turn' : 'Opponent’s turn'),
           ),
-          body: firestoreQuestionId == null
-              ? const Center(child: CircularProgressIndicator())
-              : StreamBuilder<DocumentSnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('questions')
-                      .doc(firestoreQuestionId)
-                      .snapshots(),
-                  builder: (context, qSnap) {
-                    if (!qSnap.hasData) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-
-                    final q = qSnap.data!.data() as Map<String, dynamic>;
-
-                    final question = q['text'];
-                    final qHints = [
-                      q['hint1'],
-                      q['hint2'],
-                      q['hint3'],
-                    ].whereType<String>().toList();
-
-                    return Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Score: $myScore',
-                            style: const TextStyle(fontSize: 16),
-                          ),
-                          const SizedBox(height: 12),
-
-                          // QUESTION (VISIBLE TO BOTH)
-                          Text(question, style: const TextStyle(fontSize: 18)),
-                          const SizedBox(height: 12),
-
-                          ...qHints.map((h) => Text('• $h')),
-
-                          const SizedBox(height: 16),
-
-                          if (isMyTurn) ...[
-                            TextField(
-                              controller: _answerController,
-                              decoration: const InputDecoration(
-                                labelText: 'Your answer',
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            ElevatedButton(
-                              onPressed: answering
-                                  ? null
-                                  : () => submitAnswer(firestoreQuestionId),
-                              child: const Text('Submit'),
-                            ),
-                          ] else
-                            const Text(
-                              'Waiting for opponent to answer…',
-                              style: TextStyle(fontStyle: FontStyle.italic),
-                            ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
+          body: Padding(
+            padding: const EdgeInsets.all(16),
+            child: isMyTurn ? _buildMyTurn() : _buildOpponentTurn(),
+          ),
         );
       },
     );
   }
 
-  @override
-  void dispose() {
-    _answerController.dispose();
-    super.dispose();
+  Widget _buildOpponentTurn() {
+    return const Center(
+      child: Text('Waiting for opponent...', style: TextStyle(fontSize: 22)),
+    );
+  }
+
+  Widget _buildMyTurn() {
+    if (loadingQuestion) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (questionText == null) {
+      return const Center(child: Text('Loading question...'));
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(questionText!, style: const TextStyle(fontSize: 18)),
+        const SizedBox(height: 12),
+        ...hints.map((h) => Text('• $h')),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _answerController,
+          decoration: const InputDecoration(labelText: 'Your answer'),
+        ),
+        const SizedBox(height: 12),
+        ElevatedButton(onPressed: submitAnswer, child: const Text('Submit')),
+        if (error.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Text(error, style: const TextStyle(color: Colors.red)),
+        ],
+      ],
+    );
   }
 }
