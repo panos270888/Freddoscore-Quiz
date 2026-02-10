@@ -21,22 +21,19 @@ class _GameScreenState extends State<GameScreen> {
   final TextEditingController _sessionController = TextEditingController();
   final TextEditingController _answerController = TextEditingController();
 
-  String? questionId;
-  String? questionText;
+  DocumentSnapshot? questionDoc;
   bool answering = false;
   int myScore = 0;
 
   String get myUserId => FirebaseAuth.instance.currentUser!.uid;
 
   /* =========================
-     GAME SESSION MANAGEMENT
+     SESSION ACTIONS
      ========================= */
 
   Future<void> startGame() async {
     setState(() => loading = true);
-
     final result = await functions.httpsCallable('startGameSession').call();
-
     setState(() {
       sessionId = result.data['sessionId'];
       loading = false;
@@ -45,42 +42,25 @@ class _GameScreenState extends State<GameScreen> {
 
   Future<void> joinGame() async {
     setState(() => loading = true);
-
     final id = _sessionController.text.trim();
-
     await functions.httpsCallable('joinGameSession').call({'sessionId': id});
-
     setState(() {
       sessionId = id;
       loading = false;
     });
   }
 
-  /* =========================
-     QUESTION FLOW
-     ========================= */
-
-  Future<void> loadQuestion() async {
-    if (answering || questionText != null) return;
-
+  Future<void> requestQuestion() async {
+    if (answering) return;
     setState(() => answering = true);
-
-    final result = await functions.httpsCallable('getNextQuestion').call({
+    await functions.httpsCallable('getNextQuestion').call({
       'sessionId': sessionId,
     });
-
-    setState(() {
-      questionId = result.data['questionId'];
-      questionText = result.data['text'];
-      answering = false;
-    });
+    setState(() => answering = false);
   }
 
-  Future<void> submitAnswer() async {
-    if (questionId == null) return;
-
+  Future<void> submitAnswer(String questionId) async {
     setState(() => answering = true);
-
     final result = await functions.httpsCallable('submitAnswer').call({
       'sessionId': sessionId,
       'questionId': questionId,
@@ -89,8 +69,6 @@ class _GameScreenState extends State<GameScreen> {
 
     setState(() {
       myScore = result.data['yourScore'];
-      questionId = null;
-      questionText = null;
       _answerController.clear();
       answering = false;
     });
@@ -102,7 +80,6 @@ class _GameScreenState extends State<GameScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // LOBBY
     if (sessionId == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('Game MVP')),
@@ -133,95 +110,94 @@ class _GameScreenState extends State<GameScreen> {
       );
     }
 
-    // ACTIVE GAME
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('game_sessions')
           .doc(sessionId)
           .snapshots(),
-      builder: (context, snapshot) {
-        // connection gate
-        if (snapshot.connectionState == ConnectionState.waiting) {
+      builder: (context, sessionSnap) {
+        if (!sessionSnap.hasData) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
         }
 
-        if (!snapshot.hasData || !snapshot.data!.exists) {
-          return const Scaffold(body: Center(child: Text('Session not found')));
-        }
+        final session = sessionSnap.data!.data() as Map<String, dynamic>;
+        final status = session['status'];
+        final currentTurnUserId = session['currentTurnUserId'];
+        final currentQuestionId = session['currentQuestionId'];
 
-        final data = snapshot.data!.data() as Map<String, dynamic>;
-
-        final status = data['status'];
-        final currentTurnUserId = data['currentTurnUserId'];
         final isMyTurn = currentTurnUserId == myUserId;
 
-        // WAITING FOR OPPONENT
         if (status == 'waiting') {
           return const Scaffold(
-            body: Center(
-              child: Text(
-                'Waiting for opponent...',
-                style: TextStyle(fontSize: 20),
-              ),
-            ),
+            body: Center(child: Text('Waiting for opponent...')),
           );
         }
 
-        // AUTO LOAD QUESTION WHEN MY TURN
-        if (isMyTurn && questionText == null && !answering) {
+        // 🔑 ONLY ACTIVE PLAYER REQUESTS QUESTION
+        if (isMyTurn && currentQuestionId == null && !answering) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            loadQuestion();
+            requestQuestion();
           });
         }
 
         return Scaffold(
-          appBar: AppBar(title: const Text('Game')),
-          body: Padding(
-            padding: const EdgeInsets.all(16),
-            child: isMyTurn ? _buildMyTurn() : _buildOpponentTurn(),
+          appBar: AppBar(
+            title: Text(isMyTurn ? 'Your turn' : 'Opponent’s turn'),
           ),
+          body: currentQuestionId == null
+              ? const Center(child: CircularProgressIndicator())
+              : StreamBuilder<DocumentSnapshot>(
+                  stream: FirebaseFirestore.instance
+                      .collection('questions')
+                      .doc(currentQuestionId)
+                      .snapshots(),
+                  builder: (context, qSnap) {
+                    if (!qSnap.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+
+                    final q = qSnap.data!.data() as Map<String, dynamic>;
+
+                    return Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(q['text'], style: const TextStyle(fontSize: 18)),
+                          const SizedBox(height: 12),
+                          Text('• ${q['hint1']}'),
+                          Text('• ${q['hint2']}'),
+                          Text('• ${q['hint3']}'),
+                          const SizedBox(height: 16),
+
+                          if (isMyTurn) ...[
+                            TextField(
+                              controller: _answerController,
+                              decoration: const InputDecoration(
+                                labelText: 'Your answer',
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            ElevatedButton(
+                              onPressed: answering
+                                  ? null
+                                  : () => submitAnswer(currentQuestionId),
+                              child: const Text('Submit'),
+                            ),
+                          ] else
+                            const Text(
+                              'Waiting for opponent to answer…',
+                              style: TextStyle(fontStyle: FontStyle.italic),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
         );
       },
     );
-  }
-
-  Widget _buildOpponentTurn() {
-    return const Center(
-      child: Text('Opponent’s turn', style: TextStyle(fontSize: 24)),
-    );
-  }
-
-  Widget _buildMyTurn() {
-    if (questionText == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('Your score: $myScore', style: const TextStyle(fontSize: 16)),
-        const SizedBox(height: 12),
-        Text(questionText!, style: const TextStyle(fontSize: 18)),
-        const SizedBox(height: 16),
-        TextField(
-          controller: _answerController,
-          decoration: const InputDecoration(labelText: 'Your answer'),
-        ),
-        const SizedBox(height: 16),
-        ElevatedButton(
-          onPressed: answering ? null : submitAnswer,
-          child: const Text('Submit'),
-        ),
-      ],
-    );
-  }
-
-  @override
-  void dispose() {
-    _sessionController.dispose();
-    _answerController.dispose();
-    super.dispose();
   }
 }

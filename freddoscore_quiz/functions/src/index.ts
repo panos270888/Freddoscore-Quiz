@@ -11,62 +11,54 @@ setGlobalOptions({ maxInstances: 10 });
    START GAME SESSION (OPEN SESSION)
 ========================================================= */
 export const startGameSession = onCall(async (request) => {
-  const auth = request.auth;
-
-  if (!auth) {
-    throw new HttpsError("unauthenticated", "User must be authenticated");
+  const context = request.auth;
+  if (!context) {
+    throw new HttpsError("unauthenticated", "Login required");
   }
 
-  const userId = auth.uid;
+  const userId = context.uid;
   const sessionRef = db.collection("game_sessions").doc();
 
-  await db.runTransaction(async (tx) => {
-    tx.set(sessionRef, {
-      status: "waiting",
-      createdByUserId: userId,
-
-      player1Id: userId,
-      player2Id: null,
-
-      currentTurnUserId: userId,
-      turnNumber: 1,
-
-      players: {
-        [userId]: {
-          score: 0,
-          questionsAnswered: 0,
-          usedQuestionIds: [],
-        },
+  await sessionRef.set({
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdByUserId: userId,
+    player1Id: userId,
+    status: "waiting",
+    turnNumber: 1,
+    players: {
+      [userId]: {
+        score: 0,
+        questionsAnswered: 0,
+        usedQuestionIds: [],
       },
-
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    },
   });
 
-  return { sessionId: sessionRef.id };
+  return {
+    sessionId: sessionRef.id,
+  };
 });
 
 /* =========================================================
    JOIN GAME SESSION
 ========================================================= */
 export const joinGameSession = onCall(async (request) => {
-  const auth = request.auth;
-  const { sessionId } = request.data;
-
-  if (!auth) {
-    throw new HttpsError("unauthenticated", "User must be authenticated");
+  const context = request.auth;
+  if (!context) {
+    throw new HttpsError("unauthenticated", "Login required");
   }
+
+  const userId = context.uid;
+  const { sessionId } = request.data;
 
   if (!sessionId) {
     throw new HttpsError("invalid-argument", "Missing sessionId");
   }
 
-  const userId = auth.uid;
   const sessionRef = db.collection("game_sessions").doc(sessionId);
 
-  await db.runTransaction(async (tx) => {
+  return await db.runTransaction(async (tx) => {
     const snap = await tx.get(sessionRef);
-
     if (!snap.exists) {
       throw new HttpsError("not-found", "Session not found");
     }
@@ -78,21 +70,21 @@ export const joinGameSession = onCall(async (request) => {
     }
 
     if (session.player1Id === userId) {
-      throw new HttpsError(
-        "failed-precondition",
-        "Creator cannot join their own game"
-      );
+      throw new HttpsError("failed-precondition", "Cannot join your own game");
     }
 
     tx.update(sessionRef, {
       player2Id: userId,
       status: "active",
+      currentTurnUserId: session.player1Id,
       [`players.${userId}`]: {
         score: 0,
         questionsAnswered: 0,
         usedQuestionIds: [],
       },
     });
+
+    return { success: true };
   });
 });
 
@@ -181,60 +173,78 @@ export const getNextQuestion = onCall(async (request) => {
    SUBMIT ANSWER
 ========================================================= */
 export const submitAnswer = onCall(async (request) => {
-  const auth = request.auth;
+  const context = request.auth;
   const { sessionId, questionId, answerText } = request.data;
 
-  if (!auth) {
-    throw new HttpsError("unauthenticated", "User must be authenticated");
+  if (!context) {
+    throw new HttpsError("unauthenticated", "Login required");
   }
 
-  const userId = auth.uid;
+  const userId = context.uid;
   const sessionRef = db.collection("game_sessions").doc(sessionId);
   const questionRef = db.collection("questions").doc(questionId);
 
   return await db.runTransaction(async (tx) => {
     const sessionSnap = await tx.get(sessionRef);
     if (!sessionSnap.exists) {
-      throw new HttpsError("not-found", "Game not found");
+      throw new HttpsError("not-found", "Session not found");
     }
 
     const session = sessionSnap.data()!;
+    if (session.status !== "active") {
+      throw new HttpsError("failed-precondition", "Game not active");
+    }
 
     if (session.currentTurnUserId !== userId) {
       throw new HttpsError("permission-denied", "Not your turn");
     }
 
-    const qSnap = await tx.get(questionRef);
-    if (!qSnap.exists) {
+    if (session.currentQuestionId !== questionId) {
+      throw new HttpsError("failed-precondition", "Invalid question");
+    }
+
+    const questionSnap = await tx.get(questionRef);
+    if (!questionSnap.exists) {
       throw new HttpsError("not-found", "Question not found");
     }
 
     const correct =
-      qSnap
-        .data()!
-        .answer.canonical.toLowerCase()
-        .trim() ===
-      answerText.toLowerCase().trim();
+      answerText.trim().toLowerCase() ===
+      questionSnap.data()!.answer.canonical.toLowerCase();
 
+    const playerIds = Object.keys(session.players);
     const nextTurnUserId =
-      session.player1Id === userId
-        ? session.player2Id
-        : session.player1Id;
+      playerIds.find((id) => id !== userId)!;
 
-    tx.update(sessionRef, {
-      currentTurnUserId: nextTurnUserId,
-      turnNumber: session.turnNumber + 1,
+    const nextTurnNumber = (session.turnNumber ?? 0) + 1;
+    const MAX_TURNS = 10;
+    const gameFinished = nextTurnNumber >= MAX_TURNS;
+
+    const updates: any = {
       currentQuestionId: admin.firestore.FieldValue.delete(),
+      currentQuestionStartedAt: admin.firestore.FieldValue.delete(),
+      turnNumber: nextTurnNumber,
       [`players.${userId}.score`]:
-        session.players[userId].score + (correct ? 1 : 0),
+        (session.players[userId].score ?? 0) + (correct ? 1 : 0),
       [`players.${userId}.usedQuestionIds`]:
         admin.firestore.FieldValue.arrayUnion(questionId),
-    });
+    };
+
+    if (gameFinished) {
+      updates.status = "finished";
+      updates.finishedAt =
+        admin.firestore.FieldValue.serverTimestamp();
+    } else {
+      // 🔥 THIS WAS MISSING 🔥
+      updates.currentTurnUserId = nextTurnUserId;
+    }
+
+    tx.update(sessionRef, updates);
 
     return {
       isCorrect: correct,
-      yourScore:
-        session.players[userId].score + (correct ? 1 : 0),
+      yourScore: updates[`players.${userId}.score`],
+      gameFinished,
     };
   });
 });
